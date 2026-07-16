@@ -1,41 +1,16 @@
 #![no_std]
 
+mod auth;
+mod config;
+mod errors;
 mod storage;
+mod ttl;
 
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env,
-};
+use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env};
 
+pub use config::GovernorConfig;
+pub use errors::Error;
 use storage::DataKey;
-
-#[contracttype]
-#[derive(Clone)]
-pub struct GovernorConfig {
-    pub fee_bps: u32,
-    pub fee_recipient: Address,
-    pub min_duration_seconds: u64,
-    pub max_rate_per_second: i128,
-    pub factory_address: Address,
-}
-
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum Error {
-    NotAuthorized = 1,
-    InvalidParam = 2,
-    AlreadyInitialized = 3,
-}
-
-// Mirrors the TTL extension convention used by DripFactory/DripStream.
-const TTL_THRESHOLD: u32 = 100_000;
-const TTL_EXTEND_TO: u32 = 200_000;
-
-fn bump_ttl(env: &Env) {
-    env.storage()
-        .instance()
-        .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
-}
 
 #[contract]
 pub struct DripGovernor;
@@ -56,7 +31,7 @@ impl DripGovernor {
         if env.storage().instance().has(&DataKey::Authority) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        bump_ttl(&env);
+        ttl::bump(&env);
 
         let s = env.storage().instance();
         s.set(&DataKey::Authority, &authority);
@@ -70,22 +45,13 @@ impl DripGovernor {
     // ── Reads ────────────────────────────────────────────────────────────
 
     pub fn config(env: Env) -> GovernorConfig {
-        let s = env.storage().instance();
-        GovernorConfig {
-            fee_bps: s.get(&DataKey::FeeBps).unwrap_or(30),
-            fee_recipient: s.get(&DataKey::FeeRecipient).unwrap(),
-            min_duration_seconds: s.get(&DataKey::MinDurationSeconds).unwrap_or(3600),
-            max_rate_per_second: s
-                .get(&DataKey::MaxRatePerSecond)
-                .unwrap_or(1_000_000_000_000_000),
-            factory_address: s.get(&DataKey::FactoryAddress).unwrap(),
-        }
+        config::load(&env)
     }
 
     // ── Writes (authority-gated) ─────────────────────────────────────────
 
     pub fn set_fee_bps(env: Env, fee_bps: u32) -> Result<(), Error> {
-        Self::require_authority(&env)?;
+        auth::require_authority(&env)?;
         if fee_bps > 10_000 {
             return Err(Error::InvalidParam);
         }
@@ -94,7 +60,7 @@ impl DripGovernor {
     }
 
     pub fn set_fee_recipient(env: Env, recipient: Address) -> Result<(), Error> {
-        Self::require_authority(&env)?;
+        auth::require_authority(&env)?;
         env.storage()
             .instance()
             .set(&DataKey::FeeRecipient, &recipient);
@@ -102,7 +68,7 @@ impl DripGovernor {
     }
 
     pub fn set_min_duration(env: Env, seconds: u64) -> Result<(), Error> {
-        Self::require_authority(&env)?;
+        auth::require_authority(&env)?;
         if seconds == 0 {
             return Err(Error::InvalidParam);
         }
@@ -113,7 +79,7 @@ impl DripGovernor {
     }
 
     pub fn set_max_rate(env: Env, max_rate: i128) -> Result<(), Error> {
-        Self::require_authority(&env)?;
+        auth::require_authority(&env)?;
         if max_rate <= 0 {
             return Err(Error::InvalidParam);
         }
@@ -124,23 +90,10 @@ impl DripGovernor {
     }
 
     pub fn transfer_authority(env: Env, new_authority: Address) -> Result<(), Error> {
-        Self::require_authority(&env)?;
+        auth::require_authority(&env)?;
         env.storage()
             .instance()
             .set(&DataKey::Authority, &new_authority);
-        Ok(())
-    }
-
-    // ── Helpers ──────────────────────────────────────────────────────────
-
-    fn require_authority(env: &Env) -> Result<(), Error> {
-        let authority: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Authority)
-            .ok_or(Error::NotAuthorized)?;
-        authority.require_auth();
-        bump_ttl(env);
         Ok(())
     }
 }
