@@ -84,20 +84,30 @@ conduit-contracts/
 ├── contracts/
 │   ├── stream/                 # DripStream — per-stream payment contract
 │   │   └── src/
-│   │       ├── lib.rs          # public contract interface
+│   │       ├── lib.rs          # public contract interface (thin — delegates below)
+│   │       ├── state.rs        # load/save StreamInfo, cancelled-state guard
 │   │       ├── math.rs         # withdrawable / streamed_amount calculations
 │   │       ├── storage.rs      # DataKey enum + StreamInfo struct
 │   │       ├── errors.rs       # Error contracterror enum
 │   │       ├── events.rs       # event emission helpers
+│   │       ├── ttl.rs          # instance TTL extension
 │   │       └── tests.rs        # unit tests (run with cargo test -p drip-stream)
 │   ├── factory/                # DripFactory — deployment + global registry
 │   │   └── src/
-│   │       ├── lib.rs
+│   │       ├── lib.rs          # public contract interface (thin — delegates below)
 │   │       ├── deploy.rs       # deterministic WASM deployment logic
+│   │       ├── governance.rs   # cross-contract calls into DripGovernor + bounds checks
+│   │       ├── query.rs        # pagination helper
+│   │       ├── errors.rs       # Error contracterror enum
+│   │       ├── ttl.rs          # instance + persistent-entry TTL extension
 │   │       └── storage.rs
 │   └── governor/               # DripGovernor — protocol parameters
 │       └── src/
-│           ├── lib.rs
+│           ├── lib.rs          # public contract interface (thin — delegates below)
+│           ├── config.rs       # GovernorConfig struct + load helper
+│           ├── auth.rs         # authority-gate shared by every write
+│           ├── errors.rs       # Error contracterror enum
+│           ├── ttl.rs          # instance TTL extension
 │           └── storage.rs
 ├── tests/                      # cross-contract integration tests
 │   ├── stream_lifecycle.rs
