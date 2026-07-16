@@ -258,22 +258,32 @@ conduit-contracts/
 │   ├── stream/
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── lib.rs          # contract entry points
-│   │       ├── storage.rs      # storage key definitions
+│   │       ├── lib.rs          # contract entry points (thin — delegates to the modules below)
+│   │       ├── state.rs        # load/save StreamInfo, cancelled-state guard
+│   │       ├── storage.rs      # storage key definitions + StreamInfo struct
 │   │       ├── errors.rs       # Error enum
 │   │       ├── math.rs         # withdrawable calculation
-│   │       └── events.rs       # event helpers
+│   │       ├── events.rs       # event helpers
+│   │       └── ttl.rs          # instance TTL extension
 │   ├── factory/
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── storage.rs
-│   │       └── deploy.rs       # WASM hash + deploy logic
+│   │       ├── lib.rs          # contract entry points (thin — delegates to the modules below)
+│   │       ├── storage.rs      # DataKey enum
+│   │       ├── errors.rs       # Error enum
+│   │       ├── deploy.rs       # WASM hash + deploy logic
+│   │       ├── governance.rs   # cross-contract calls into DripGovernor + bounds checks
+│   │       ├── query.rs        # pagination helper for streams_by_sender/recipient
+│   │       └── ttl.rs          # instance + persistent-entry TTL extension
 │   └── governor/
 │       ├── Cargo.toml
 │       └── src/
-│           ├── lib.rs
-│           └── storage.rs
+│           ├── lib.rs          # contract entry points (thin — delegates to the modules below)
+│           ├── storage.rs      # DataKey enum
+│           ├── errors.rs       # Error enum
+│           ├── config.rs       # GovernorConfig struct + load helper
+│           ├── auth.rs         # authority-gate shared by every write
+│           └── ttl.rs          # instance TTL extension
 ├── tests/
 │   ├── stream_lifecycle.rs     # create → withdraw → cancel
 │   ├── stream_clawback.rs
