@@ -3,79 +3,16 @@
 mod errors;
 mod events;
 mod math;
+mod state;
 mod storage;
 #[cfg(test)]
 mod tests;
+mod ttl;
 
 use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, Env};
 
 pub use errors::Error;
 use storage::{DataKey, StreamInfo};
-
-fn load(env: &Env) -> StreamInfo {
-    StreamInfo {
-        sender: env.storage().instance().get(&DataKey::Sender).unwrap(),
-        recipient: env.storage().instance().get(&DataKey::Recipient).unwrap(),
-        token: env.storage().instance().get(&DataKey::Token).unwrap(),
-        rate_per_second: env
-            .storage()
-            .instance()
-            .get(&DataKey::RatePerSecond)
-            .unwrap(),
-        start_time: env.storage().instance().get(&DataKey::StartTime).unwrap(),
-        end_time: env.storage().instance().get(&DataKey::EndTime).unwrap(),
-        withdrawn: env
-            .storage()
-            .instance()
-            .get(&DataKey::Withdrawn)
-            .unwrap_or(0),
-        paused: env
-            .storage()
-            .instance()
-            .get(&DataKey::Paused)
-            .unwrap_or(false),
-        paused_at: env
-            .storage()
-            .instance()
-            .get(&DataKey::PausedAt)
-            .unwrap_or(0),
-        clawback_enabled: env
-            .storage()
-            .instance()
-            .get(&DataKey::ClawbackEnabled)
-            .unwrap_or(false),
-        cancelled: env
-            .storage()
-            .instance()
-            .get(&DataKey::Cancelled)
-            .unwrap_or(false),
-    }
-}
-
-fn save_withdrawn(env: &Env, amount: i128) {
-    env.storage().instance().set(&DataKey::Withdrawn, &amount);
-}
-
-fn assert_not_cancelled(info: &StreamInfo) -> Result<(), Error> {
-    if info.cancelled {
-        Err(Error::StreamCancelled)
-    } else {
-        Ok(())
-    }
-}
-
-// Instance storage (all of this contract's state) has a TTL like any other
-// Soroban storage entry. Without extending it, an inactive stream would be
-// archived and become inaccessible. Values mirror the TTL extension the
-// factory already applies to its StreamAddr registry entries.
-const TTL_THRESHOLD: u32 = 100_000;
-const TTL_EXTEND_TO: u32 = 200_000;
-
-fn bump_ttl(env: &Env) {
-    env.storage()
-        .instance()
-        .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
-}
 
 #[contract]
 pub struct DripStream;
@@ -102,7 +39,7 @@ impl DripStream {
         if env.storage().instance().has(&DataKey::Sender) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        bump_ttl(&env);
+        ttl::bump(&env);
 
         let s = env.storage().instance();
         s.set(&DataKey::Sender, &sender);
@@ -123,10 +60,10 @@ impl DripStream {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        bump_ttl(&env);
+        ttl::bump(&env);
 
-        let info = load(&env);
-        assert_not_cancelled(&info)?;
+        let info = state::load(&env);
+        state::assert_not_cancelled(&info)?;
         info.recipient.require_auth();
 
         let available = math::withdrawable(&env, &info)?;
@@ -139,7 +76,7 @@ impl DripStream {
             .withdrawn
             .checked_add(to_send)
             .ok_or(Error::ArithmeticOverflow)?;
-        save_withdrawn(&env, new_withdrawn);
+        state::save_withdrawn(&env, new_withdrawn);
 
         let tk = token::Client::new(&env, &info.token);
         let contract_addr = env.current_contract_address();
@@ -162,10 +99,10 @@ impl DripStream {
     /// the recipient's share MUST be transferred here rather than left for
     /// a later `withdraw()` call.
     pub fn cancel(env: Env) -> Result<(), Error> {
-        bump_ttl(&env);
+        ttl::bump(&env);
 
-        let info = load(&env);
-        assert_not_cancelled(&info)?;
+        let info = state::load(&env);
+        state::assert_not_cancelled(&info)?;
         info.sender.require_auth();
 
         let tk = token::Client::new(&env, &info.token);
@@ -198,10 +135,10 @@ impl DripStream {
 
     /// Sender pauses the stream.
     pub fn pause(env: Env) -> Result<(), Error> {
-        bump_ttl(&env);
+        ttl::bump(&env);
 
-        let info = load(&env);
-        assert_not_cancelled(&info)?;
+        let info = state::load(&env);
+        state::assert_not_cancelled(&info)?;
         if info.paused {
             return Err(Error::AlreadyPaused);
         }
@@ -219,10 +156,10 @@ impl DripStream {
 
     /// Sender resumes a paused stream.
     pub fn resume(env: Env) -> Result<(), Error> {
-        bump_ttl(&env);
+        ttl::bump(&env);
 
-        let info = load(&env);
-        assert_not_cancelled(&info)?;
+        let info = state::load(&env);
+        state::assert_not_cancelled(&info)?;
         if !info.paused {
             return Err(Error::NotPaused);
         }
@@ -253,10 +190,10 @@ impl DripStream {
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
-        bump_ttl(&env);
+        ttl::bump(&env);
 
-        let info = load(&env);
-        assert_not_cancelled(&info)?;
+        let info = state::load(&env);
+        state::assert_not_cancelled(&info)?;
         info.sender.require_auth();
 
         let tk = token::Client::new(&env, &info.token);
@@ -271,10 +208,10 @@ impl DripStream {
 
     /// Sender reclaims unstreamed tokens (only if clawback was enabled).
     pub fn clawback(env: Env) -> Result<i128, Error> {
-        bump_ttl(&env);
+        ttl::bump(&env);
 
-        let info = load(&env);
-        assert_not_cancelled(&info)?;
+        let info = state::load(&env);
+        state::assert_not_cancelled(&info)?;
         if !info.clawback_enabled {
             return Err(Error::ClawbackDisabled);
         }
@@ -298,7 +235,7 @@ impl DripStream {
 
     /// Read-only: current withdrawable balance for the recipient.
     pub fn withdrawable(env: Env) -> i128 {
-        let info = load(&env);
+        let info = state::load(&env);
         if info.cancelled {
             return 0;
         }
@@ -315,10 +252,10 @@ impl DripStream {
     pub fn force_cancel(env: Env) -> Result<(), Error> {
         const PAUSE_THRESHOLD_SECS: u64 = 2_592_000; // 30 days
 
-        bump_ttl(&env);
+        ttl::bump(&env);
 
-        let info = load(&env);
-        assert_not_cancelled(&info)?;
+        let info = state::load(&env);
+        state::assert_not_cancelled(&info)?;
         if !info.paused {
             return Err(Error::NotPaused);
         }
@@ -358,10 +295,10 @@ impl DripStream {
     /// to the new recipient. The sender is intentionally not notified
     /// on-chain (use events); governance can add a sender-veto in future.
     pub fn transfer_recipient(env: Env, new_recipient: Address) -> Result<(), Error> {
-        bump_ttl(&env);
+        ttl::bump(&env);
 
-        let info = load(&env);
-        assert_not_cancelled(&info)?;
+        let info = state::load(&env);
+        state::assert_not_cancelled(&info)?;
         info.recipient.require_auth();
 
         env.storage()
@@ -376,7 +313,7 @@ impl DripStream {
     /// Useful for UIs that want to show "X streamed, Y withdrawn, Z remaining"
     /// without the caller needing to reimplement the rate × elapsed math.
     pub fn streamed_total(env: Env) -> i128 {
-        let info = load(&env);
+        let info = state::load(&env);
         if info.cancelled {
             return 0;
         }
@@ -385,6 +322,6 @@ impl DripStream {
 
     /// Read-only: full stream state.
     pub fn info(env: Env) -> StreamInfo {
-        load(&env)
+        state::load(&env)
     }
 }

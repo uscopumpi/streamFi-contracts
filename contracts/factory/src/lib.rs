@@ -1,43 +1,19 @@
 #![no_std]
 
 mod deploy;
+mod errors;
+mod governance;
+mod query;
 mod storage;
+mod ttl;
 
 // Import `token` as `tok` to avoid shadowing by any `token: Address` parameter.
 use soroban_sdk::{
-    contract, contracterror, contractimpl, panic_with_error, token as tok, Address, BytesN, Env,
-    IntoVal, Vec,
+    contract, contractimpl, panic_with_error, token as tok, Address, BytesN, Env, IntoVal, Vec,
 };
 
-use drip_governor::DripGovernorClient;
-
+pub use errors::Error;
 use storage::DataKey;
-
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[repr(u32)]
-pub enum Error {
-    NotInitialized = 1,
-    InvalidDeposit = 2,
-    InvalidRate = 3,
-    InvalidTimeRange = 4,
-    InsufficientDeposit = 5,
-    BackdatedStream = 6,
-    AlreadyInitialized = 7,
-    RateExceedsMax = 8,
-    DurationTooShort = 9,
-    ArithmeticOverflow = 10,
-}
-
-// Mirrors the TTL extension already applied to StreamAddr entries below.
-const TTL_THRESHOLD: u32 = 100_000;
-const TTL_EXTEND_TO: u32 = 200_000;
-
-fn bump_instance_ttl(env: &Env) {
-    env.storage()
-        .instance()
-        .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
-}
 
 #[contract]
 pub struct DripFactory;
@@ -54,7 +30,7 @@ impl DripFactory {
         if env.storage().instance().has(&DataKey::StreamCount) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
-        bump_instance_ttl(&env);
+        ttl::bump_instance(&env);
 
         env.storage()
             .instance()
@@ -84,7 +60,7 @@ impl DripFactory {
     ) -> Result<u64, Error> {
         // ── Auth ─────────────────────────────────────────────────────────
         sender.require_auth();
-        bump_instance_ttl(&env);
+        ttl::bump_instance(&env);
 
         // ── Validation ───────────────────────────────────────────────────
         if deposit <= 0 {
@@ -116,24 +92,13 @@ impl DripFactory {
         }
 
         // ── Governor-controlled bounds ──────────────────────────────────────
-        // rate_per_sec and (for fixed-duration streams) the declared length
-        // must respect the protocol parameters DripGovernor holds. These were
-        // previously never read by the factory at all.
         let governor: Address = env
             .storage()
             .instance()
             .get(&DataKey::GovernorAddress)
             .ok_or(Error::NotInitialized)?;
-        let config = DripGovernorClient::new(&env, &governor).config();
-        if rate_per_sec > config.max_rate_per_second {
-            return Err(Error::RateExceedsMax);
-        }
-        if end_time > 0 {
-            let duration = end_time - start_time;
-            if duration < config.min_duration_seconds {
-                return Err(Error::DurationTooShort);
-            }
-        }
+        let config = governance::config(&env, &governor);
+        governance::enforce_bounds(&config, rate_per_sec, start_time, end_time)?;
 
         // ── Pull deposit from sender ──────────────────────────────────────
         // Using the aliased `tok` to avoid any future shadowing issues.
@@ -181,8 +146,8 @@ impl DripFactory {
         // Extend TTL on the stream address entry so it outlives ledger pruning.
         env.storage().persistent().extend_ttl(
             &DataKey::StreamAddr(stream_id),
-            TTL_THRESHOLD,
-            TTL_EXTEND_TO,
+            ttl::THRESHOLD,
+            ttl::EXTEND_TO,
         );
         env.storage()
             .instance()
@@ -199,8 +164,8 @@ impl DripFactory {
             .set(&DataKey::BySender(sender.clone()), &by_sender);
         env.storage().persistent().extend_ttl(
             &DataKey::BySender(sender),
-            TTL_THRESHOLD,
-            TTL_EXTEND_TO,
+            ttl::THRESHOLD,
+            ttl::EXTEND_TO,
         );
 
         let mut by_recipient: Vec<u64> = env
@@ -214,8 +179,8 @@ impl DripFactory {
             .set(&DataKey::ByRecipient(recipient.clone()), &by_recipient);
         env.storage().persistent().extend_ttl(
             &DataKey::ByRecipient(recipient),
-            TTL_THRESHOLD,
-            TTL_EXTEND_TO,
+            ttl::THRESHOLD,
+            ttl::EXTEND_TO,
         );
 
         Ok(stream_id)
@@ -233,7 +198,7 @@ impl DripFactory {
             .persistent()
             .get(&DataKey::BySender(sender))
             .unwrap_or(Vec::new(&env));
-        paginate(&env, all, offset, limit)
+        query::paginate(&env, all, offset, limit)
     }
 
     pub fn streams_by_recipient(env: Env, recipient: Address, offset: u32, limit: u32) -> Vec<u64> {
@@ -242,7 +207,7 @@ impl DripFactory {
             .persistent()
             .get(&DataKey::ByRecipient(recipient))
             .unwrap_or(Vec::new(&env));
-        paginate(&env, all, offset, limit)
+        query::paginate(&env, all, offset, limit)
     }
 
     pub fn stream_count(env: Env) -> u64 {
@@ -260,7 +225,7 @@ impl DripFactory {
     pub fn protocol_fee_bps(env: Env) -> u32 {
         let governor: Option<Address> = env.storage().instance().get(&DataKey::GovernorAddress);
         match governor {
-            Some(governor) => DripGovernorClient::new(&env, &governor).config().fee_bps,
+            Some(governor) => governance::config(&env, &governor).fee_bps,
             None => 30,
         }
     }
@@ -278,23 +243,10 @@ impl DripFactory {
             .get(&DataKey::GovernorAddress)
             .ok_or(Error::NotInitialized)?;
         governor.require_auth();
-        bump_instance_ttl(&env);
+        ttl::bump_instance(&env);
         env.storage()
             .instance()
             .set(&DataKey::StreamWasmHash, &new_wasm_hash);
         Ok(())
     }
-}
-
-fn paginate(env: &Env, v: Vec<u64>, offset: u32, limit: u32) -> Vec<u64> {
-    let mut result = Vec::new(env);
-    let start = offset as usize;
-    // offset + limit is caller-controlled and can overflow u32; the release
-    // profile enables overflow-checks, so a raw `+` here would panic this
-    // read-only view call rather than just clamping to the Vec's length.
-    let end = (offset as usize).saturating_add(limit as usize);
-    for i in start..end.min(v.len() as usize) {
-        result.push_back(v.get(i as u32).unwrap());
-    }
-    result
 }
