@@ -21,8 +21,11 @@ pub enum Error {
     /// `unpause` was called while the factory was not paused.
     NotPaused = 13,
     DurationExceedsMax = 14,
+    /// The governor contract did not respond (archived, not initialised,
+    /// or a host-level error occurred during the cross-contract call).
+    GovernorNotResponding = 15,
     /// `create_batch_streams` was called with an empty `requests` vector.
-    EmptyBatch = 15,
+    EmptyBatch = 16,
     /// `create_batch_streams` requests exceeded `MAX_BATCH_SIZE`.
-    BatchTooLarge = 16,
+    BatchTooLarge = 17,
 }

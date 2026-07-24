@@ -1,5 +1,8 @@
 target/
 .contract-ids/
+temp_auto_push.bat
 **/*.wasm
 .DS_Store
 test_snapshots/
+.gitignore
+branch_structure.json

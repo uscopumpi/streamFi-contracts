@@ -53,7 +53,7 @@ impl DripGovernor {
 
     // ── Reads ────────────────────────────────────────────────────────────
 
-    pub fn config(env: Env) -> GovernorConfig {
+    pub fn config(env: Env) -> Result<GovernorConfig, Error> {
         config::load(&env)
     }
 
