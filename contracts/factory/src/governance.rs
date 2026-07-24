@@ -4,8 +4,18 @@ use soroban_sdk::{Address, Env};
 use crate::Error;
 
 /// Fetches the live protocol config from `governor` via a cross-contract call.
-pub fn config(env: &Env, governor: &Address) -> GovernorConfig {
-    DripGovernorClient::new(env, governor).config()
+///
+/// Returns `Err(GovernorNotResponding)` when the cross-contract call fails
+/// (governor archived / not initialised / host error) instead of letting the
+/// host trap bubble up as an opaque error.
+pub fn config(env: &Env, governor: &Address) -> Result<GovernorConfig, Error> {
+    // Cross-contract call — flattens the nested Result from try_config()
+    // (outer = host error, inner = governor contract error) so callers see
+    // a meaningful `GovernorNotResponding` instead of an opaque host trap.
+    let result = DripGovernorClient::new(env, governor)
+        .try_config()
+        .map_err(|_| Error::GovernorNotResponding)?;
+    result.map_err(|_| Error::GovernorNotResponding)
 }
 
 /// Enforces the governor-controlled rate/duration bounds on a new stream.
