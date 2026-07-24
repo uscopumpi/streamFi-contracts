@@ -116,7 +116,7 @@ impl DripFactory {
             .instance()
             .get(&DataKey::GovernorAddress)
             .ok_or(Error::NotInitialized)?;
-        let config = governance::config(&env, &governor);
+        let config = governance::config(&env, &governor)?;
         governance::enforce_bounds(&config, rate_per_sec, start_time, end_time)?;
 
         // ── All validation passed — safe to touch state now ──────────────
@@ -308,7 +308,7 @@ impl DripFactory {
     pub fn protocol_fee_bps(env: Env) -> u32 {
         let governor: Option<Address> = env.storage().instance().get(&DataKey::GovernorAddress);
         match governor {
-            Some(governor) => governance::config(&env, &governor).fee_bps,
+            Some(governor) => governance::config(&env, &governor).map(|c| c.fee_bps).unwrap_or(30),
             None => 30,
         }
     }

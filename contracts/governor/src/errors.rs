@@ -9,4 +9,7 @@ pub enum Error {
     AlreadyInitialized = 3,
     /// Refused to revoke the last `Admin`, which would freeze governance.
     LastAdmin = 4,
+    /// The governor has not been initialised yet (required storage keys
+    /// are missing).
+    NotInitialized = 5,
 }

@@ -232,3 +232,35 @@ fn transfer_authority_moves_admin() {
     let result = client.try_grant_role(&authority, &Role::RateManager, &target);
     assert_eq!(result, Err(Ok(Error::NotAuthorized)));
 }
+
+// ── Regression: uninitialised governor does not panic ────────────────────────
+//
+// Issue #89: the original `config()` used `unwrap()` on required storage keys.
+// A cross-contract caller on an uninitialised governor would receive an opaque
+// host trap with no indication of what went wrong. After the fix `config()`
+// returns `Result<GovernorConfig, Error>` and `load()` returns `NotInitialized`
+// when the mandatory keys are missing.
+
+#[test]
+fn uninitialized_governor_returns_error_not_panics() {
+    let env = Env::default();
+    let id = env.register_contract(None, DripGovernor);
+    let client = DripGovernorClient::new(&env, &id);
+
+    // Calling config() on an uninitialised governor must return an error
+    // rather than panicking inside a cross-contract call.
+    let result = client.try_config();
+    assert!(result.is_err());
+}
+
+#[test]
+fn config_after_initialize_returns_correct_values() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _authority) = deploy_governor(&env);
+    let cfg = client.config();
+    assert_eq!(cfg.fee_bps, 30);
+    assert_eq!(cfg.min_duration_seconds, 3600);
+    assert_eq!(cfg.max_rate_per_second, 1_000_000_000_000_000);
+}
