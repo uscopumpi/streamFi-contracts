@@ -1,7 +1,9 @@
 target/
 .contract-ids/
 **/*.wasm
+temp_auto_push.bat
 .DS_Store
 test_snapshots/
 frontend/node_modules/
-node_modules/
+node_modules/.gitignore
+branch_structure.json

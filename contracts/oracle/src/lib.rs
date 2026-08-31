@@ -112,6 +112,15 @@ pub struct OracleConfig {
     /// Maximum allowable age (in seconds) of a price submission before it is
     /// treated as stale by [`TwapOracle::get_twap_price`] or [`TwapOracle::is_price_stale`].
     pub max_staleness: u64,
+    /// Absolute upper-bound ceiling for submitted prices. When non-zero,
+    /// [`TwapOracle::submit_price`] rejects any `price > max_price` with
+    /// [`Error::PriceExceedsMaxPrice`] before the value enters the TWAP
+    /// window. Set to `0` to disable the ceiling (unlimited).
+    ///
+    /// This catches fat-fingered or malicious admin key submissions that
+    /// would otherwise corrupt the TWAP median until enough correct
+    /// observations roll it out — see issue #226.
+    pub max_price: u64,
 }
 
 #[contracttype]
@@ -181,6 +190,8 @@ pub enum Error {
     InvalidMaxStaleness = 1015,
     /// `Submitters` already holds `MAX_SUBMITTERS` distinct feeders.
     TooManySubmitters = 1016,
+    /// Submitted price exceeds the configured `max_price` ceiling.
+    PriceExceedsMaxPrice = 1017,
 }
 
 #[contract]
@@ -306,6 +317,11 @@ impl TwapOracle {
     ///   - `asset_peg`: Target asset peg identifier/format.
     ///   - `max_staleness`: Maximum allowable age in seconds for price observations before
     ///     they are deemed stale.
+    ///   - `max_price`: Absolute upper-bound ceiling for submitted prices.
+    ///     When non-zero, [`submit_price`](Self::submit_price) rejects any
+    ///     `price > max_price` with [`Error::PriceExceedsMaxPrice`]. Set to
+    ///     `0` to disable (no ceiling). Catches fat-fingered or malicious
+    ///     submissions before they corrupt the TWAP window (#226).
     ///
     /// # Price Cache Invalidation
     ///
@@ -394,6 +410,12 @@ impl TwapOracle {
     /// submission is tracked independently (`DataKey::Submission`) and
     /// aggregated by `get_twap_price` — no single feeder's price is trusted
     /// unconditionally.
+    ///
+    /// If `OracleConfig::max_price` is non-zero, the submitted `price` must
+    /// not exceed that ceiling; otherwise [`Error::PriceExceedsMaxPrice`] is
+    /// returned before any state is mutated. This catches fat-fingered or
+    /// malicious submissions at submission time rather than letting them
+    /// propagate into the TWAP window — see issue #226.
     pub fn submit_price(env: Env, caller: Address, price: u64) -> Result<(), Error> {
         if is_paused(&env) {
             return Err(Error::ContractPaused);
@@ -402,6 +424,16 @@ impl TwapOracle {
 
         if price == 0 {
             return Err(Error::InvalidPrice);
+        }
+
+        // Enforce the configured `max_price` ceiling when present. If the
+        // oracle has not been configured yet there is no ceiling to enforce
+        // (identical to `max_price == 0`), so submission is not blocked — see
+        // issue #226.
+        if let Some(config) = env.storage().instance().get::<_, OracleConfig>(&DataKey::Config) {
+            if config.max_price != 0 && price > config.max_price {
+                return Err(Error::PriceExceedsMaxPrice);
+            }
         }
 
         let now = env.ledger().timestamp();
@@ -1032,6 +1064,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1049,6 +1082,7 @@ mod tests {
             decimals: 39,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         let result = client.try_configure_oracle(&admin, &config);
         assert_eq!(result, Err(Ok(Error::InvalidDecimals)));
@@ -1063,6 +1097,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 0,
+            max_price: 0,
         };
         let result = client.try_configure_oracle(&admin, &config);
         assert_eq!(result, Err(Ok(Error::InvalidMaxStaleness)));
@@ -1128,6 +1163,90 @@ mod tests {
         assert_eq!(result, Err(Ok(Error::InvalidPrice)));
     }
 
+    // ── Issue #226: max_price upper-bound sanity check ──────────────────
+
+    #[test]
+    fn submit_price_rejects_price_above_max_price() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+
+        let config = OracleConfig {
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+            max_price: 1_000_000_000_000_000_000,
+        };
+        client.configure_oracle(&admin, &config);
+
+        let feeder = Address::generate(&env);
+        client.grant_role(&admin, &Role::PriceFeeder, &feeder);
+
+        // A price just above the ceiling must be rejected.
+        let result = client.try_submit_price(&feeder, &1_000_000_000_000_000_001);
+        assert_eq!(result, Err(Ok(Error::PriceExceedsMaxPrice)));
+
+        // A wildly out-of-range price (orders of magnitude too large) is also rejected.
+        let result = client.try_submit_price(&feeder, &u64::MAX);
+        assert_eq!(result, Err(Ok(Error::PriceExceedsMaxPrice)));
+    }
+
+    #[test]
+    fn submit_price_accepts_price_at_or_below_max_price() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
+
+        let config = OracleConfig {
+            decimals: 8,
+            asset_peg: 1,
+            max_staleness: 300,
+            max_price: 1_000_000_000_000_000_000,
+        };
+        client.configure_oracle(&admin, &config);
+
+        // Exactly at the ceiling is allowed.
+        client.submit_price(&admin, &1_000_000_000_000_000_000);
+        assert_eq!(
+            client.get_twap_price(),
+            1_000_000_000_000_000_000
+        );
+
+        // Below the ceiling is allowed.
+        client.submit_price(&admin, &500_000_000);
+        assert_eq!(client.get_twap_price(), 500_000_000);
+    }
+
+    #[test]
+    fn submit_price_accepts_any_price_when_max_price_is_zero() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
+
+        let config = OracleConfig {
+            decimals: 0,
+            asset_peg: 1,
+            max_staleness: 300,
+            max_price: 0,
+        };
+        client.configure_oracle(&admin, &config);
+
+        // `max_price == 0` disables the ceiling, so even u64::MAX is accepted.
+        client.submit_price(&admin, &u64::MAX);
+        assert_eq!(client.get_twap_price(), u64::MAX);
+    }
+
+    #[test]
+    fn submit_price_without_config_has_no_ceiling() {
+        let (env, client, admin) = setup();
+        client.initialize(&admin);
+        grant_admin_feeder(&client, &admin);
+
+        // Before `configure_oracle`, there is no ceiling to enforce, so
+        // submission still succeeds (backward-compatible behavior).
+        let result = client.try_submit_price(&admin, &100);
+        assert!(result.is_ok());
+    }
+
     #[test]
     fn get_twap_price_requires_config() {
         let (_env, client, _admin) = setup();
@@ -1144,6 +1263,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1161,6 +1281,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 60,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1191,6 +1312,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1210,6 +1332,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1229,6 +1352,7 @@ mod tests {
             decimals: 0,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1248,6 +1372,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
         client.submit_price(&admin, &50_000_000);
@@ -1335,6 +1460,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
         client.submit_price(&admin, &50_000_000);
@@ -1386,6 +1512,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
         client.submit_price(&admin, &50_000_000);
@@ -1597,6 +1724,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         let result = client.try_configure_oracle(&admin, &config);
         assert_eq!(result, Err(Ok(Error::NotAuthorized)));
@@ -1615,6 +1743,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1641,6 +1770,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1664,6 +1794,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 60,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1700,6 +1831,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 60,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1733,6 +1865,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
         client.submit_price(&admin, &50_000_000);
@@ -1770,6 +1903,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1787,6 +1921,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 60,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
         client.submit_price(&admin, &50_000_000);
@@ -1824,6 +1959,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1840,6 +1976,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1885,6 +2022,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1932,6 +2070,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -1981,6 +2120,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -2011,6 +2151,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
         client.submit_price(&admin, &50_000_000);
@@ -2022,6 +2163,7 @@ mod tests {
             decimals: 6,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &new_config);
 
@@ -2039,6 +2181,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
         client.submit_price(&admin, &50_000_000);
@@ -2050,6 +2193,7 @@ mod tests {
             decimals: 8,
             asset_peg: 2,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &new_config);
 
@@ -2067,6 +2211,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
         client.submit_price(&admin, &50_000_000);
@@ -2078,6 +2223,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 600,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &new_config);
 
@@ -2096,6 +2242,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -2134,6 +2281,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -2157,6 +2305,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
@@ -2190,6 +2339,7 @@ mod tests {
             decimals: 8,
             asset_peg: 1,
             max_staleness: 300,
+            max_price: 0,
         };
         client.configure_oracle(&admin, &config);
 
