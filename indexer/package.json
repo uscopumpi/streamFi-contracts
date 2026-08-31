@@ -6,9 +6,9 @@
   "type": "module",
   "main": "dist/worker.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "start:worker": "node dist/worker.js",
-    "dev": "tsx src/worker.ts",
+    "build": "node init && tsc -p tsconfig.json",
+    "start:worker": "node init && node dist/worker.js",
+    "dev": "node init && tsx src/worker.ts",
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"

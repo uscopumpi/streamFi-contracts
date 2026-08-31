@@ -122,15 +122,6 @@ impl DripStream {
         }
 
         let s = env.storage().instance();
-        s.set(&DataKey::Sender, &sender);
-        s.set(&DataKey::Recipient, &recipient);
-        s.set(&DataKey::Token, &token);
-        s.set(&DataKey::RatePerSecond, &rate_per_second);
-        s.set(&DataKey::StartTime, &start_time);
-        s.set(&DataKey::EndTime, &end_time);
-        s.set(&DataKey::Withdrawn, &0_i128);
-        s.set(&DataKey::PausedAt, &0_u64);
-        s.set(&DataKey::Flags, &flags);
         s.set(&DataKey::EventSequence, &0_u64);
         s.set(&DataKey::StorageVersion, &storage::CURRENT_STORAGE_VERSION);
 
